@@ -1,94 +1,64 @@
 import re
-from typing import Dict, List
-
-import fitz  # PyMuPDF
-
+import fitz
 
 FIELD_ALIASES = {
-    "Vendor Name": ["vendor name", "supplier name", "company name", "name of supplier", "name"],
+    "Vendor Name": ["vendor name", "supplier name", "company name", "name of supplier", "name of vendor"],
     "Vendor Code": ["vendor code", "supplier code", "vendor id", "supplier id"],
-    "GST Number": ["gst number", "gst no", "gstin", "gst registration number", "gst registration"],
-    "PAN Number": ["pan number", "pan no", "pan"],
-    "Address": ["registered address", "vendor address", "supplier address", "address"],
+    "GST Number": ["gst no", "gst number", "gstin", "gst registration number", "gst registration"],
+    "PAN Number": ["pan", "pan no", "pan number"],
+    "Address": ["address", "registered address", "office address", "supplier address", "vendor address"],
     "Contact Person": ["contact person", "contact name", "person name"],
-    "Phone Number": ["phone number", "phone", "mobile number", "mobile", "contact number", "telephone"],
-    "Email": ["email address", "email", "e-mail"],
+    "Phone Number": ["phone", "phone number", "mobile", "mobile number", "contact number", "telephone"],
+    "Email": ["email", "email id", "e-mail", "e-mail id"],
     "Bank Name": ["bank name", "bank"],
-    "Account Number": ["account number", "account no", "a/c number", "a/c no"],
-    "IFSC Code": ["ifsc code", "ifsc", "ifsc no"],
+    "Account Number": ["account number", "account no", "bank account"],
+    "IFSC Code": ["ifsc", "ifsc code"],
 }
 
+PATTERNS = {
+    "GST Number": r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b",
+    "PAN Number": r"\b[A-Z]{5}\d{4}[A-Z]\b",
+    "Email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    "Phone Number": r"\b(?:\+91[-\s]?)?[6-9]\d{9}\b",
+    "IFSC Code": r"\b[A-Z]{4}0[A-Z0-9]{6}\b",
+}
 
-def extract_pdf_text(pdf_bytes: bytes) -> str:
-    """Extract selectable text from a PDF. OCR can be added later for scanned PDFs."""
-    document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = [page.get_text("text") for page in document]
-    document.close()
-    return "\n".join(pages)
+def extract_text(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    return "\n".join(page.get_text("text") for page in doc)
 
+def clean_value(value):
+    return re.sub(r"\s+", " ", value).strip(" :-\t")
 
-def clean_value(value: str) -> str:
-    value = re.sub(r"\s+", " ", value).strip(" :\t-|;")
-    return value
-
-
-def extract_by_label(text: str, aliases: List[str]) -> str:
-    """Find a value occurring after a known label, primarily for label:value layouts."""
+def extract_labeled_value(text, aliases):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-
-    # Prefer the longest aliases first to avoid matching 'pan' inside other labels.
-    aliases = sorted(aliases, key=len, reverse=True)
-    for i, line in enumerate(lines):
+    for line in lines:
         lower = line.lower()
         for alias in aliases:
-            pattern = rf"^\s*{re.escape(alias)}\s*(?:[:\-]|\|)\s*(.+)$"
-            match = re.match(pattern, line, flags=re.IGNORECASE)
-            if match:
-                return clean_value(match.group(1))
-
-            # Handle labels where the value is separated by whitespace.
-            if lower == alias.lower() and i + 1 < len(lines):
-                return clean_value(lines[i + 1])
-
-            # Handle label followed by whitespace and value, e.g. "GSTIN 27..."
-            pattern = rf"^\s*{re.escape(alias)}\s+(.+)$"
-            match = re.match(pattern, line, flags=re.IGNORECASE)
-            if match:
-                candidate = clean_value(match.group(1))
-                if candidate and candidate.lower() != alias.lower():
-                    return candidate
-
+            if alias in lower:
+                parts = re.split(r"[:\-]\s*", line, maxsplit=1)
+                if len(parts) == 2 and parts[1].strip():
+                    return clean_value(parts[1])
+                idx = lower.find(alias)
+                value = line[idx + len(alias):].strip(" :-\t")
+                if value:
+                    return clean_value(value)
     return ""
 
+def extract_vendor_data(pdf_file):
+    text = extract_text(pdf_file)
+    result = {}
 
-def extract_structured_fields(text: str) -> Dict[str, str]:
-    """Extract common vendor fields using aliases and basic validation."""
-    result = {field: extract_by_label(text, aliases) for field, aliases in FIELD_ALIASES.items()}
+    for field, aliases in FIELD_ALIASES.items():
+        result[field] = extract_labeled_value(text, aliases)
 
-    # Strong pattern-based extraction for identifiers/contact information.
-    if not result["GST Number"]:
-        gst = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", text, re.I)
-        if gst:
-            result["GST Number"] = gst.group(0).upper()
+    for field, pattern in PATTERNS.items():
+        if not result.get(field):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                result[field] = (
+                    match.group(0).upper()
+                    if field != "Email" else match.group(0)
+                )
 
-    if not result["PAN Number"]:
-        pan = re.search(r"\b[A-Z]{5}\d{4}[A-Z]\b", text, re.I)
-        if pan:
-            result["PAN Number"] = pan.group(0).upper()
-
-    if not result["Email"]:
-        email = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, re.I)
-        if email:
-            result["Email"] = email.group(0)
-
-    if not result["Phone Number"]:
-        phone = re.search(r"(?<!\d)(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)", text)
-        if phone:
-            result["Phone Number"] = phone.group(0)
-
-    if not result["IFSC Code"]:
-        ifsc = re.search(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", text, re.I)
-        if ifsc:
-            result["IFSC Code"] = ifsc.group(0).upper()
-
-    return result
+    return result, text
