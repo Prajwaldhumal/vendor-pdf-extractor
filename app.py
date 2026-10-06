@@ -1,69 +1,70 @@
 import io
-import pandas as pd
 import streamlit as st
+import pandas as pd
+from extractor import extract_vendor_data
 
-from extractor import extract_pdf_text, extract_structured_fields
-
-
-st.set_page_config(page_title="Vendor PDF Extractor", page_icon="📄", layout="wide")
+st.set_page_config(page_title="Vendor PDF → Excel", page_icon="📄", layout="wide")
 
 st.title("📄 Vendor PDF → Excel Extractor")
-st.write("Upload one or more vendor PDFs. The application will extract common vendor details and prepare an Excel file.")
-
-with st.sidebar:
-    st.header("Extraction Fields")
-    fields = [
-        "Vendor Name", "Vendor Code", "GST Number", "PAN Number", "Address",
-        "Contact Person", "Phone Number", "Email", "Bank Name", "Account Number", "IFSC Code"
-    ]
-    selected_fields = [field for field in fields if st.checkbox(field, value=True)]
+st.caption("Upload multiple vendor PDFs. All extracted vendor records are combined into ONE Excel file.")
 
 uploaded_files = st.file_uploader(
-    "Upload Vendor PDF files",
+    "Upload Vendor PDF(s)",
     type=["pdf"],
-    accept_multiple_files=True,
+    accept_multiple_files=True
 )
 
-if uploaded_files:
+if uploaded_files and st.button("🔎 Extract All Details", type="primary"):
     rows = []
     raw_texts = {}
 
-    with st.spinner("Extracting vendor details..."):
+    with st.spinner("Extracting all vendor PDFs..."):
         for uploaded_file in uploaded_files:
-            pdf_bytes = uploaded_file.read()
-            try:
-                text = extract_pdf_text(pdf_bytes)
-                raw_texts[uploaded_file.name] = text
-                extracted = extract_structured_fields(text)
-                row = {field: extracted.get(field, "") for field in selected_fields}
-                row["Source PDF"] = uploaded_file.name
-                rows.append(row)
-            except Exception as exc:
-                st.error(f"Could not process {uploaded_file.name}: {exc}")
+            data, raw_text = extract_vendor_data(uploaded_file)
+            data["Source PDF"] = uploaded_file.name
+            rows.append(data)
+            raw_texts[uploaded_file.name] = raw_text
 
-    if rows:
-        df = pd.DataFrame(rows)
-        columns = ["Source PDF"] + selected_fields
-        df = df[[c for c in columns if c in df.columns]]
+    fields = [
+        "Source PDF", "Vendor Name", "Vendor Code", "GST Number",
+        "PAN Number", "Address", "Contact Person", "Phone Number",
+        "Email", "Bank Name", "Account Number", "IFSC Code"
+    ]
 
-        st.subheader("Extraction Preview")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    df = pd.DataFrame(rows)
+    for col in fields:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[fields]
 
-        st.subheader("Raw Text Preview")
-        selected_pdf = st.selectbox("Choose a PDF to inspect", list(raw_texts.keys()))
-        st.text_area("Extracted text", raw_texts[selected_pdf], height=250)
+    st.session_state["df"] = df
+    st.session_state["raw_texts"] = raw_texts
 
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Vendor Details")
-        output.seek(0)
+if "df" in st.session_state:
+    st.subheader("📊 Combined Extraction Result")
+    st.info(f"{len(st.session_state['df'])} vendor PDF(s) → 1 Excel file")
 
-        st.download_button(
-            label="⬇️ Export to Excel",
-            data=output,
-            file_name="vendor_details.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
+    edited_df = st.data_editor(
+        st.session_state["df"],
+        use_container_width=True,
+        num_rows="fixed"
+    )
+    st.session_state["df"] = edited_df
+
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        st.session_state["df"].to_excel(
+            writer, index=False, sheet_name="Vendor Details"
         )
-else:
-    st.info("Upload one or more PDF files to begin.")
+
+    st.download_button(
+        "📥 Download ONE Excel File",
+        data=excel_buffer.getvalue(),
+        file_name="vendor_details.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    with st.expander("🔍 View extracted raw text"):
+        for name, text in st.session_state["raw_texts"].items():
+            st.markdown(f"**{name}**")
+            st.text(text[:10000])
